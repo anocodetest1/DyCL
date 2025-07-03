@@ -1,0 +1,18 @@
+name: TestDaCampusDataset
+
+# num_classes_train_level0: 210
+# num_classes_train_level1: 8
+# num_samples_train: 4320
+
+kwargs:
+  data_dir: ${dataset.kwargs.data_dir}
+  alpha: 1.0
+  relevance_type: pop
+
+sampler:
+  name: oldHierarchicalSampler
+  kwargs:
+    batch_size: 128
+    samples_per_class: 4
+    batches_per_super_tuple: 4
+    super_classes_per_batch: 2

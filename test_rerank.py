@@ -1,0 +1,175 @@
+import os
+from os.path import join
+import random
+
+import numpy as np
+from omegaconf import OmegaConf
+import hydra
+import torch
+import torch.nn as nn
+from torch.utils.tensorboard import SummaryWriter
+
+import dycl.lib as lib
+import dycl.engine as eng
+from dycl.getter import Getter
+
+
+def if_func(cond, x, y):
+    if not isinstance(cond, bool):
+        cond = eval(cond)
+        assert isinstance(cond, bool)
+    if cond:
+        return x
+    return y
+
+
+OmegaConf.register_new_resolver("mult", lambda *numbers: np.prod([float(x) for x in numbers]))
+OmegaConf.register_new_resolver("sum", lambda *numbers: sum(map(float, numbers)))
+OmegaConf.register_new_resolver("sub", lambda x, y: float(x) - float(y))
+OmegaConf.register_new_resolver("div", lambda x, y: float(x) / float(y))
+OmegaConf.register_new_resolver("if", if_func)
+
+
+@hydra.main(config_path='config', config_name='default')
+def test(config): 
+
+    # """""""""""""""""" Handle Config """"""""""""""""""""""""""
+    config.experience.log_dir = lib.expand_path(config.experience.log_dir)
+    log_dir = join(config.experience.log_dir, config.experience.experiment_name)
+
+
+    if config.experience.resume is not None:
+        if os.path.isfile(lib.expand_path(config.experience.resume)):
+            resume = lib.expand_path(config.experience.resume)
+        else:
+            resume = os.path.join(log_dir, 'weights', config.experience.resume)
+            if not os.path.isfile(resume):
+                lib.LOGGER.warning("Checkpoint does not exists")
+                return
+
+        state = torch.load(resume, map_location='cpu')
+        at_epoch = state["epoch"]
+        if at_epoch >= config.experience.max_iter:
+            lib.LOGGER.warning(f"Exiting trial, experiment {config.experience.experiment_name} already finished")
+            return
+
+        lib.LOGGER.info(f"Resuming from state : {resume}")
+        restore_epoch = state['epoch']
+
+    else:
+        resume = None
+        state = None
+        restore_epoch = 0
+        if os.path.isdir(os.path.join(log_dir, 'weights')) and not config.experience.DEBUG:
+            lib.LOGGER.warning(f"Exiting trial, experiment {config.experience.experiment_name} already exists")
+            lib.LOGGER.warning(f"Its access: {log_dir}")
+            return
+
+    os.makedirs(join(log_dir, 'logs'), exist_ok=True)
+    os.makedirs(join(log_dir, 'weights'), exist_ok=True)
+    writer = SummaryWriter(join(log_dir, "logs"), purge_step=restore_epoch)
+
+    # """""""""""""""""" Handle Reproducibility"""""""""""""""""""""""""
+    # lib.LOGGER.info(f"Training with seed {config.experience.seed}")
+    random.seed(config.experience.seed)
+    np.random.seed(config.experience.seed)
+    torch.manual_seed(config.experience.seed)
+    torch.cuda.manual_seed_all(config.experience.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    # """""""""""""""""" Create Data """"""""""""""""""""""""""
+    os.environ['USE_CUDA_FOR_RELEVANCE'] = 'yes'
+    getter = Getter()
+    net = getter.get_model(config.model)
+
+    scaler = None
+    if config.model.kwargs.with_autocast:
+        scaler = torch.cuda.amp.GradScaler()
+        if state is not None:
+            scaler.load_state_dict(state['scaler_state'])
+
+    if state is not None:
+        net.load_state_dict(state['net_state'])
+        net.cuda()
+
+    # """""""""""""""""" Create Optimizer & Scheduler """"""""""""""""""""""""""
+    optimizer, scheduler = getter.get_optimizer(net, config.optimizer) 
+
+    if state is not None:
+        for key, opt in optimizer.items():
+            opt.load_state_dict(state['optimizer_state'][key])
+
+        for key, sch in scheduler.items():
+            sch.load_state_dict(state[f'scheduler_{key}_state'])
+
+    # """""""""""""""""" Create Criterion """"""""""""""""""""""""""
+    criterion = getter.get_loss(config.loss)
+
+    for crit, _ in criterion:
+        if hasattr(crit, 'register_labels'):
+            crit.register_labels(torch.from_numpy(train_dts.labels))
+
+    if state is not None and "criterion_state" in state:
+        for (crit, _), crit_state in zip(criterion, state["criterion_state"]):
+            crit.cuda()
+            crit.load_state_dict(crit_state)
+
+    acc = getter.get_acc_calculator(config.experience)
+
+    # """""""""""""""""" Handle Cuda """"""""""""""""""""""""""
+    if torch.cuda.device_count() > 1:
+        lib.LOGGER.info("Model is parallelized")
+        net = nn.DataParallel(net)
+
+    if config.experience.parallelize_loss:
+        for i, (crit, w) in enumerate(criterion):
+            level = crit.hierarchy_level
+            crit = nn.DataParallel(crit)
+            crit.hierarchy_level = level
+
+    net.cuda()
+    _ = [crit.cuda() for crit, _ in criterion]
+
+    train_transform = getter.get_transform(config.transform.train)
+    test_transform = getter.get_transform(config.transform.test)
+    train_dts = getter.get_dataset(train_transform, 'train', 'satellite', 'drone', config.dataset)  
+    test_dts_1 = getter.get_dataset_test(test_transform, 'test', 'satellite', 'drone', config.dataset_test)
+    test_dts_3 = getter.get_dataset_test(test_transform, 'test', 'drone', 'satellite', config.dataset_test)
+
+    acc = getter.get_acc_calculator(config.experience)
+
+
+    dataset_dict = {}  
+    dataset_dict["satellite_drone"]={}
+    dataset_dict["drone_satellite"]={}
+    dataset_dict["satellite_drone"]["query"] = test_dts_1
+    dataset_dict["satellite_drone"]["gallery"] = test_dts_3
+    dataset_dict["drone_satellite"]["query"] = test_dts_3
+    dataset_dict["drone_satellite"]["gallery"] = test_dts_1
+    
+    metrics = None
+    if dataset_dict:
+        checkpoint_path = "./experiments/dycl_20epoch.ckpt"
+        checkpoint = torch.load(checkpoint_path)
+        model_state_dict = checkpoint['net_state']  
+        net.load_state_dict(model_state_dict) 
+        metrics = eng.evaluate(
+                net=net,
+                dataset_dict=dataset_dict,
+                acc=acc,
+            )
+        torch.cuda.empty_cache()
+    if metrics is not None:
+        for split, mtrc in metrics.items():
+            for k, v in mtrc.items():
+                if k == 'epoch':
+                        continue
+                lib.LOGGER.info(f"{split} --> {k} : {np.around(v*100, decimals=2)}")
+                writer.add_scalar(f"DyCL/{split.title()}/Evaluation/{k}", v, 0)#
+            print()
+    return 
+
+
+if __name__ == '__main__':
+    test()

@@ -1,0 +1,28 @@
+defaults:
+
+    - experience: default
+
+    - dataset: da_campus
+
+    - dataset_test: da_campus
+
+    - loss: dycl
+
+    - model: resnet_ln
+
+    - optimizer: da_campus
+
+    - transform: da_campus
+
+    - override hydra/job_logging: colorlog
+
+    - override hydra/hydra_logging: colorlog
+  
+
+hydra:
+  run:
+    dir: ${experience.log_dir}/${experience.experiment_name}/outputs
+
+  sweep:
+    dir: ${experience.log_dir}
+    subdir: ${experience.experiment_name}/outputs
