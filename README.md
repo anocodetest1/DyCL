@@ -17,9 +17,6 @@ Please consider citing our work:
 
 ```
 
-
-
-
 ## Use dycl
 
 This will create a virtual environment and install the dependencies described in `requirements.txt`:
@@ -36,7 +33,7 @@ WARNING: as of now this code does not work for newer version of `torch`. It only
 
 ## Datasets
 
-The proposed dataset DA_Campus is available at https://huggingface.co/datasets/www0wwwjs1/DA_Campus/blob/main/DA_Campus.tar.gz
+The proposed dataset DA_Campus is available at: https://huggingface.co/datasets/www0wwwjs1/DA_Campus/blob/main/DA_Campus.tar.gz
 
 
 Once extracted the code should work with the base structure of the datasets. You can precise the direction of the dataset to run an experiment in `DyCL_main/config/dataset/da_campus.yaml`:
@@ -45,12 +42,18 @@ Once extracted the code should work with the base structure of the datasets. You
 dataset.data_dir=/Path/To/Your/Data/DA_Campus
 ```
 
+## Trained model
+
+The best performing model on DA_Campus is available at: https://huggingface.co/www0wwwjs1/dycl/blob/main/dycl_20epoch.ckpt
+
+You can download it and put it in the `experiments/dycl_train` folder.
 
 ## Run the code
 
 The code uses Hydra for the config. You can override arguments from command line or change a whole config. You can easily add other configs in ./config.
 
 In the `test_rerank.py` file, at line 156, you can replace the path to the trained model.
+
 ### DA_Campus
 
 <details>
